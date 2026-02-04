@@ -50,25 +50,34 @@ def to_delta(uptime:str)->datetime.timedelta:
 
 @dataclass
 class LastUpdate:
-    update: datetime.date
+    update: datetime.date | None
     uptime: datetime.timedelta
 
-def get_last(hostname:str,ssh_user:SshUser)->LastUpdate:
+def get_last(hostname:str,ssh_user:SshUser,timeout:int)->LastUpdate:
     """Get last apt upgrade and uptime times from remote host via SSH.
 
     Args:
         hostname: Remote host to connect to
-        account: SSH account/username
-        keyfile: Path to SSH private key file
+        ssh_user: SSH user information (account and keyfile)
+        timeout: SSH command timeout in seconds
 
     Returns:
         LastUpdate object with update and uptime dates
     """
-    ssh_base = ['ssh', '-i', str(ssh_user.keyfile), f'{ssh_user.account}@{hostname}']
+    ssh_base = [
+        'ssh',
+        '-i', str(ssh_user.keyfile),
+        '-o', f'ConnectTimeout={timeout}',
+        '-o', 'ServerAliveInterval=5',
+        '-o', 'ServerAliveCountMax=3',
+        f'{ssh_user.account}@{hostname}'
+    ]
 
     # Get last apt-get upgrade time
+    # Add a buffer to subprocess timeout to let SSH handle its own timeout
+    subprocess_timeout = timeout + 5
     apt_cmd = ssh_base + ['zless /var/log/apt/history*']
-    apt_result = subprocess.run(apt_cmd, capture_output=True, text=True)
+    apt_result = subprocess.run(apt_cmd, capture_output=True, text=True, timeout=subprocess_timeout)
 
     if apt_result.returncode != 0:
         raise RuntimeError(f"Failed to get apt history: {apt_result.stderr}")
@@ -89,12 +98,11 @@ def get_last(hostname:str,ssh_user:SshUser)->LastUpdate:
                     if last_upgrade_date is None or current_date > last_upgrade_date:
                         last_upgrade_date = current_date
 
-    if last_upgrade_date is None:
-        raise RuntimeError("No apt upgrade dates found in history")
+    # last_upgrade_date will be None if no apt-get upgrade found in history
 
     # Get last uptime time
     uptime_cmd = ssh_base + ['uptime']
-    uptime_result = subprocess.run(uptime_cmd, capture_output=True, text=True)
+    uptime_result = subprocess.run(uptime_cmd, capture_output=True, text=True, timeout=subprocess_timeout)
 
     if uptime_result.returncode != 0:
         raise RuntimeError(f"Failed to get uptime history: {uptime_result.stderr}")
