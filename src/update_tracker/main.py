@@ -7,6 +7,7 @@ import sqlite3
 import yaml
 
 from update_tracker import update_tracker_logger, init_database
+from update_tracker.database import report
 from update_tracker.last_update import get_last
 from update_tracker.query import query_ansible
 
@@ -78,24 +79,42 @@ def main():
     ssh_seconds = c['ssh seconds']
     sample_cutoff_hours = c['sample hours']
     sample_cutoff_delta = datetime.timedelta(hours=sample_cutoff_hours)
-    uptime_limit = datetime.timedelta(days=c['uptime days'])
-    update_limit = datetime.timedelta(days=c['update days'])
+    uptime_limit_days = c['uptime days']
+    update_limit_days = c['update days']
+
+    # Determine which hosts to sample
+    if args.resample:
+        # Only sample out-of-date servers
+        issues = report(conn, uptime_limit_days, update_limit_days)
+
+        # Build set of all overdue hostnames
+        overdue_hosts = set()
+        overdue_hosts.update(hostname for hostname, _ in issues.uptime)
+        overdue_hosts.update(issues.never_updated)
+        overdue_hosts.update(hostname for hostname, _, _ in issues.update_old)
+
+        # Filter inventory to only overdue hosts
+        hosts_to_sample = [host for host in inv.inventory if host in overdue_hosts]
+        update_tracker_logger.info(f"Resample mode: sampling {len(hosts_to_sample)} overdue hosts out of {len(inv.inventory)} total")
+    else:
+        hosts_to_sample = inv.inventory
 
     processed = 0
     skipped = 0
 
-    for host in inv.inventory:
+    for host in hosts_to_sample:
         try:
             update_tracker_logger.debug(f"host {host}")
                 # Check if host was sampled recently
-            last_sample = get_last_sample_time(conn, host)
-            if last_sample:
-                time_since_sample = sample_time - last_sample
-                if time_since_sample < sample_cutoff_delta:
-                    msg = f"{host}: skipped (last sampled {time_since_sample.total_seconds() / 3600:.1f} hours ago)"
-                    update_tracker_logger.info(msg)
-                    skipped += 1
-                    continue
+            if not args.resample:
+                last_sample = get_last_sample_time(conn, host)
+                if last_sample:
+                    time_since_sample = sample_time - last_sample
+                    if time_since_sample < sample_cutoff_delta:
+                        msg = f"{host}: skipped (last sampled {time_since_sample.total_seconds() / 3600:.1f} hours ago)"
+                        update_tracker_logger.info(msg)
+                        skipped += 1
+                        continue
 
             r = get_last(host, inv, ssh_seconds)
             update_info = r.update if r.update else "never"

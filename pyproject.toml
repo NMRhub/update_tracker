@@ -23,6 +23,7 @@ where = ["src"]  # Specify the "src" directory to look for packages
 [project.scripts]
 update_tracker = "update_tracker.main:main"
 report = "update_tracker.report:main"
+manage = "update_tracker.manage:main"
 
 [project.optional-dependencies] 
 # test = ['pytest']

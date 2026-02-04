@@ -8,8 +8,6 @@ import yaml
 
 from update_tracker import update_tracker_logger, init_database
 from update_tracker.database import report
-from update_tracker.last_update import get_last
-from update_tracker.query import query_ansible
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
@@ -39,6 +37,7 @@ def main():
     update_limit_days = c['update days']
 
     issues = report(conn,uptime_limit_days,update_limit_days)
+    conn.close()
     # Display results
     print("=" * 70)
     print("UPDATE TRACKER REPORT")
@@ -48,31 +47,31 @@ def main():
     print("=" * 70)
 
     # Display uptime issues
-    if issues['uptime']:
+    if issues.uptime:
         print(f"\n⚠️  Servers with excessive uptime (>{uptime_limit_days} days):")
-        for hostname, uptime_days in sorted(issues['uptime'], key=lambda x: x[1], reverse=True):
+        for hostname, uptime_days in sorted(issues.uptime, key=lambda x: x[1], reverse=True):
             print(f"  • {hostname}: {uptime_days:.1f} days")
     else:
         print(f"\n✓ No servers with excessive uptime (>{uptime_limit_days} days)")
 
     # Display never updated servers
-    if issues['never_updated']:
+    if issues.never_updated:
         print(f"\n⚠️  Servers never updated:")
-        for hostname in sorted(issues['never_updated']):
+        for hostname in sorted(issues.never_updated):
             print(f"  • {hostname}")
     else:
         print(f"\n✓ No servers without update history")
 
     # Display outdated update issues
-    if issues['update_old']:
+    if issues.update_old:
         print(f"\n⚠️  Servers with outdated updates (>{update_limit_days} days):")
-        for hostname, last_update_date, days_since in sorted(issues['update_old'], key=lambda x: x[2], reverse=True):
+        for hostname, last_update_date, days_since in sorted(issues.update_old, key=lambda x: x[2], reverse=True):
             print(f"  • {hostname}: last updated {last_update_date} ({days_since} days ago)")
     else:
         print(f"\n✓ No servers with outdated updates (>{update_limit_days} days)")
 
     # Summary
-    total_issues = len(issues['uptime']) + len(issues['never_updated']) + len(issues['update_old'])
+    total_issues = issues.total
     print("\n" + "=" * 70)
     if total_issues > 0:
         print(f"TOTAL: {total_issues} server(s) require attention")
