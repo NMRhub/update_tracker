@@ -30,9 +30,21 @@ def init_database(db_path: str) -> sqlite3.Connection:
                 hostname TEXT PRIMARY KEY,
                 last_update DATE,
                 uptime_days REAL NOT NULL,
-                sample_time TIMESTAMP NOT NULL
+                sample_time TIMESTAMP NOT NULL,
+                kernel_needs_reboot INTEGER,
+                kernel_available INTEGER
             )
         ''')
+    else:
+        # Migrate existing table: add new columns if missing
+        cursor.execute("PRAGMA table_info(host_updates)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if 'kernel_needs_reboot' not in columns:
+            cursor.execute('ALTER TABLE host_updates ADD COLUMN kernel_needs_reboot INTEGER')
+        if 'kernel_available' not in columns:
+            cursor.execute('ALTER TABLE host_updates ADD COLUMN kernel_available INTEGER')
 
     conn.commit()
     return conn
+
+from update_tracker.query import query_ansible

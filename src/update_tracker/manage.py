@@ -32,6 +32,22 @@ def delete_host(conn: sqlite3.Connection, hostname: str) -> bool:
     return True
 
 
+def mark_updated(conn: sqlite3.Connection, hostname: str) -> bool:
+    """Mark a hostname as updated today."""
+    cursor = conn.cursor()
+
+    cursor.execute('SELECT hostname FROM host_updates WHERE hostname = ?', (hostname,))
+    if not cursor.fetchone():
+        return False
+
+    today = datetime.date.today()
+    cursor.execute('''UPDATE host_updates
+        SET last_update = ?
+        WHERE hostname = ?''', (today, hostname))
+    conn.commit()
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -42,8 +58,8 @@ def main():
                         help="YAML configuration file")
 
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument('--delete', metavar='HOSTNAME',
-                       help="Remove this hostname from database")
+    group.add_argument('--delete', help="Remove this hostname from database")
+    group.add_argument('--mark-updated',help="Manually mark this hostname as updated today")
 
     args = parser.parse_args()
     log_level = getattr(logging, args.loglevel)
@@ -62,11 +78,20 @@ def main():
     conn = init_database(database_file)
 
     # Handle delete operation
-    if args.delete:
-        hostname = args.delete
+    if (hostname := args.delete):
         if delete_host(conn, hostname):
             print(f"✓ Deleted {hostname} from database")
             update_tracker_logger.info(f"Deleted {hostname}")
+        else:
+            print(f"✗ Host {hostname} not found in database")
+            update_tracker_logger.warning(f"Host {hostname} not found")
+
+    # Handle mark-updated operation
+    if (hostname := args.mark_updated):
+        if mark_updated(conn, hostname):
+            today = datetime.date.today()
+            print(f"✓ Marked {hostname} as updated on {today}")
+            update_tracker_logger.info(f"Marked {hostname} as updated on {today}")
         else:
             print(f"✗ Host {hostname} not found in database")
             update_tracker_logger.warning(f"Host {hostname} not found")

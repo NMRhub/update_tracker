@@ -2,11 +2,10 @@
 import argparse
 import datetime
 import logging
-import sqlite3
 
 import yaml
 
-from update_tracker import update_tracker_logger, init_database
+from update_tracker import update_tracker_logger, init_database, query_ansible
 from update_tracker.database import report
 
 def main():
@@ -27,32 +26,47 @@ def main():
     with open(args.yaml) as f:
         config = yaml.safe_load((f))
     database_file = config['data']
+    a = config['ansible']
+    c = config['cutoffs']
 
-    # Initialize database
+    # Build per-host limits from each inventory group, using the more permissive
+    # (longer) limits if a host appears in multiple inventories
+    host_limits: dict[str, tuple[int, int]] = {}
+    for inv_name in a['inventory']:
+        inv_limits = c[inv_name]
+        uptime_days = inv_limits['uptime days']
+        update_days = inv_limits['update days']
+        group_inv = query_ansible(a['config'], [inv_name])
+        for host in group_inv.inventory:
+            if host in host_limits:
+                existing_uptime, existing_update = host_limits[host]
+                host_limits[host] = (max(existing_uptime, uptime_days), max(existing_update, update_days))
+            else:
+                host_limits[host] = (uptime_days, update_days)
+
     conn = init_database(database_file)
     current_time = datetime.datetime.now(datetime.timezone.utc)
 
-    c = config['cutoffs']
-    uptime_limit_days = c['uptime days']
-    update_limit_days = c['update days']
-
-    issues = report(conn,uptime_limit_days,update_limit_days)
+    issues = report(conn, host_limits)
     conn.close()
+
     # Display results
     print("=" * 70)
     print("UPDATE TRACKER REPORT")
     print(f"Generated: {current_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    print(f"Uptime limit: {uptime_limit_days} days")
-    print(f"Update limit: {update_limit_days} days")
+    for inv_name in a['inventory']:
+        inv_limits = c[inv_name]
+        print(f"  {inv_name}: uptime={inv_limits['uptime days']}d, update={inv_limits['update days']}d")
     print("=" * 70)
 
     # Display uptime issues
     if issues.uptime:
-        print(f"\n⚠️  Servers with excessive uptime (>{uptime_limit_days} days):")
+        print(f"\n⚠️  Servers with excessive uptime:")
         for hostname, uptime_days in sorted(issues.uptime, key=lambda x: x[1], reverse=True):
-            print(f"  • {hostname}: {uptime_days:.1f} days")
+            uptime_limit, _ = host_limits.get(hostname, (0, 0))
+            print(f"  • {hostname}: {uptime_days:.1f} days (limit: {uptime_limit})")
     else:
-        print(f"\n✓ No servers with excessive uptime (>{uptime_limit_days} days)")
+        print(f"\n✓ No servers with excessive uptime")
 
     # Display never updated servers
     if issues.never_updated:
@@ -64,11 +78,28 @@ def main():
 
     # Display outdated update issues
     if issues.update_old:
-        print(f"\n⚠️  Servers with outdated updates (>{update_limit_days} days):")
+        print(f"\n⚠️  Servers with outdated updates:")
         for hostname, last_update_date, days_since in sorted(issues.update_old, key=lambda x: x[2], reverse=True):
-            print(f"  • {hostname}: last updated {last_update_date} ({days_since} days ago)")
+            _, update_limit = host_limits.get(hostname, (0, 0))
+            print(f"  • {hostname}: last updated {last_update_date} ({days_since} days ago, limit: {update_limit})")
     else:
-        print(f"\n✓ No servers with outdated updates (>{update_limit_days} days)")
+        print(f"\n✓ No servers with outdated updates")
+
+    # Display kernel reboot needed
+    if issues.kernel_needs_reboot:
+        print(f"\n⚠️  Servers with newer kernel installed (reboot required):")
+        for hostname in sorted(issues.kernel_needs_reboot):
+            print(f"  • {hostname}")
+    else:
+        print(f"\n✓ No servers requiring kernel reboot")
+
+    # Display kernel update available
+    if issues.kernel_available:
+        print(f"\n⚠️  Servers with kernel update available:")
+        for hostname in sorted(issues.kernel_available):
+            print(f"  • {hostname}")
+    else:
+        print(f"\n✓ No servers with kernel updates pending")
 
     # Summary
     total_issues = issues.total
@@ -78,8 +109,6 @@ def main():
     else:
         print("TOTAL: All servers are up to date!")
     print("=" * 70)
-
-    conn.close()
 
 
 if __name__ == "__main__":

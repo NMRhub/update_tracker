@@ -10,7 +10,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from last_update import get_last
+from update_tracker.last_update import UpdateChecker
+
 
 @dataclass
 class Sdata:
@@ -47,8 +48,9 @@ def main():
     print("-" * 60)
 
     try:
-        sd = Sdata(args.account,Path(args.keyfile))
-        result = get_last(args.hostname, sd)
+        sd = Sdata(args.account, Path(args.keyfile))
+        with UpdateChecker(sd, timeout=30) as checker:
+            result = checker.get_last(args.hostname)
         print(f"Last apt upgrade: {result.update}")
         print(f"Uptime:      {result.uptime}")
         print("-" * 60)
