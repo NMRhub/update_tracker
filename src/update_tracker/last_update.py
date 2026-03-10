@@ -1,3 +1,4 @@
+import concurrent.futures
 import datetime
 import re
 import subprocess
@@ -5,7 +6,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from update_tracker import SshUser
+from update_tracker import SshUser, update_tracker_logger
 
 
 def to_delta(uptime:str)->datetime.timedelta:
@@ -109,6 +110,7 @@ print(f'ubuntu:{needs_reboot}:{available}')
         ]
         self.scp_base = ['scp'] + self._ssh_opts
         self._local_script: Path | None = None
+        self._executor = concurrent.futures.ThreadPoolExecutor()
 
     def __enter__(self):
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
@@ -117,11 +119,17 @@ print(f'ubuntu:{needs_reboot}:{available}')
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is None and self._local_script is not None:
+        self._executor.shutdown(wait=False)
+        if self._local_script is not None:
             self._local_script.unlink(missing_ok=True)
         return False
 
+    def submit(self, hostname: str) -> concurrent.futures.Future:
+        """Submit get_last for hostname to the thread pool and return the Future."""
+        return self._executor.submit(self.get_last, hostname)
+
     def get_last(self, hostname: str) -> LastUpdate:
+        update_tracker_logger.info(f"Sampling {hostname}")
         remote_user_host = f'{self._account}@{hostname}'
         ssh_base = ['ssh'] + self._ssh_opts + [remote_user_host]
 

@@ -3,6 +3,7 @@ import argparse
 import datetime
 import logging
 import sqlite3
+from concurrent.futures import Future
 
 import yaml
 
@@ -59,6 +60,8 @@ def main():
                         help="YAML configuration file")
     parser.add_argument('-r','--resample',action='store_true',
                         help="Only sample overdue servers")
+    parser.add_argument('-s', '--server', default=None,
+                        help="Only sample this single server")
 
     args = parser.parse_args()
     log_level = getattr(logging, args.loglevel)
@@ -102,7 +105,10 @@ def main():
     sample_time = datetime.datetime.now(datetime.timezone.utc)
 
     # Determine which hosts to sample
-    if args.resample:
+    if args.server:
+        hosts_to_sample = [args.server]
+        update_tracker_logger.info(f"Single-server mode: sampling {args.server}")
+    elif args.resample:
         # Check each host against its per-host limits to find overdue ones
         cursor = conn.cursor()
         cursor.execute('SELECT hostname, last_update, uptime_days FROM host_updates')
@@ -130,21 +136,26 @@ def main():
     skipped = 0
 
     with UpdateChecker(inv, ssh_seconds) as checker:
+        # Submit all hosts to thread pool, skipping recently-sampled ones
+        futures: dict[str, Future] = {}
         for host in hosts_to_sample:
-            try:
-                update_tracker_logger.debug(f"host {host}")
-                # Check if host was sampled recently
-                if not args.resample:
-                    last_sample = get_last_sample_time(conn, host)
-                    if last_sample:
-                        time_since_sample = sample_time - last_sample
-                        if time_since_sample < sample_cutoff_delta:
-                            msg = f"{host}: skipped (last sampled {time_since_sample.total_seconds() / 3600:.1f} hours ago)"
-                            update_tracker_logger.info(msg)
-                            skipped += 1
-                            continue
+            update_tracker_logger.debug(f"host {host}")
+            if not args.resample and not args.server:
+                last_sample = get_last_sample_time(conn, host)
+                if last_sample:
+                    time_since_sample = sample_time - last_sample
+                    if time_since_sample < sample_cutoff_delta:
+                        update_tracker_logger.info(
+                            f"{host}: skipped (last sampled {time_since_sample.total_seconds() / 3600:.1f} hours ago)"
+                        )
+                        skipped += 1
+                        continue
+            futures[host] = checker.submit(host)
 
-                r = checker.get_last(host)
+        # Collect results and write to database
+        for host, future in futures.items():
+            try:
+                r = future.result(timeout=60)
                 update_info = r.update if r.update else "never"
                 update_tracker_logger.info(
                     f"{host}: update={update_info}, uptime={r.uptime}, "

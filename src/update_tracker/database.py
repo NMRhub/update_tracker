@@ -2,6 +2,8 @@
 import datetime
 from dataclasses import dataclass, field
 
+from update_tracker import HostSpec
+
 
 @dataclass
 class Overdue:
@@ -18,7 +20,7 @@ class Overdue:
         return len(self.uptime) + len(self.never_updated) + len(self.update_old) + len(self.kernel_needs_reboot) + len(self.kernel_available)
 
 
-def report(conn, host_limits: dict[str, tuple[int, int]]) -> Overdue:
+def report(conn, host_spec: HostSpec):
     """Query database and return overdue hosts checked against per-host limits.
 
     Args:
@@ -35,8 +37,11 @@ def report(conn, host_limits: dict[str, tuple[int, int]]) -> Overdue:
 
     for row in cursor.fetchall():
         hostname, last_update, uptime_days, sample_time, kernel_needs_reboot, kernel_available = row
+        if not host_spec.filter(hostname):
+            continue
 
-        uptime_limit, update_limit = host_limits.get(hostname, (0, 0))
+
+        uptime_limit, update_limit = host_spec.host_limits.get(hostname, (0, 0))
 
         if uptime_days > uptime_limit:
             issues.uptime.append((hostname, uptime_days))
