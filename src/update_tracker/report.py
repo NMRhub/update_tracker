@@ -5,7 +5,7 @@ import logging
 
 import yaml
 
-from update_tracker import update_tracker_logger, init_database, query_ansible, HostSpec
+from update_tracker import update_tracker_logger, postgres_connect, query_ansible, HostSpec
 from update_tracker.database import report
 
 def main():
@@ -25,7 +25,6 @@ def main():
     )
     with open(args.yaml) as f:
         config = yaml.safe_load((f))
-    database_file = config['data']
     a = config['ansible']
     c = config['cutoffs']
 
@@ -44,7 +43,7 @@ def main():
             else:
                 host_limits[host] = (uptime_days, update_days)
 
-    conn = init_database(database_file)
+    conn = postgres_connect(config)
     current_time = datetime.datetime.now(datetime.timezone.utc)
 
     hs = HostSpec(host_limits=host_limits)

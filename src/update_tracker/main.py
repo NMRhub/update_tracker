@@ -2,32 +2,31 @@
 import argparse
 import datetime
 import logging
-import sqlite3
 from concurrent.futures import Future
 
+import psycopg
 import yaml
 
-from update_tracker import update_tracker_logger, init_database
+from update_tracker import update_tracker_logger, postgres_connect
 from update_tracker.last_update import UpdateChecker
 from update_tracker.query import query_ansible
 
 
-def get_last_sample_time(conn: sqlite3.Connection, hostname: str) -> datetime.datetime | None:
+def get_last_sample_time(conn: psycopg.Connection, hostname: str) -> datetime.datetime | None:
     """Get the last sample time for a host."""
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT sample_time FROM host_updates
-        WHERE hostname = ?
+        SELECT sample_time FROM audit.host_updates
+        WHERE hostname = %s
     ''', (hostname,))
 
     row = cursor.fetchone()
     if row:
-        # Parse the timestamp string back to datetime
-        return datetime.datetime.fromisoformat(row[0])
+        return row[0]
     return None
 
 
-def store_update(conn: sqlite3.Connection, hostname: str,
+def store_update(conn: psycopg.Connection, hostname: str,
                  last_update_date: datetime.date | None,
                  uptime: datetime.timedelta,
                  sample_time: datetime.datetime,
@@ -36,19 +35,20 @@ def store_update(conn: sqlite3.Connection, hostname: str,
     """Store host update information in the database."""
     cursor = conn.cursor()
 
-    # Convert uptime to days (as float for precision)
     uptime_days = uptime.total_seconds() / 86400.0
 
-    # SQLite stores booleans as integers; None stays NULL
-    def to_int(b: bool | None) -> int | None:
-        return int(b) if b is not None else None
-
     cursor.execute('''
-        INSERT OR REPLACE INTO host_updates
-        (hostname, last_update, uptime_days, sample_time, kernel_needs_reboot, kernel_available)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO audit.host_updates
+            (hostname, last_update, uptime_days, sample_time, kernel_needs_reboot, kernel_available)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (hostname) DO UPDATE SET
+            last_update         = EXCLUDED.last_update,
+            uptime_days         = EXCLUDED.uptime_days,
+            sample_time         = EXCLUDED.sample_time,
+            kernel_needs_reboot = EXCLUDED.kernel_needs_reboot,
+            kernel_available    = EXCLUDED.kernel_available
     ''', (hostname, last_update_date, uptime_days, sample_time,
-          to_int(kernel_needs_reboot), to_int(kernel_available)))
+          kernel_needs_reboot, kernel_available))
 
     conn.commit()
 
@@ -76,8 +76,8 @@ def main():
     )
     with open(args.yaml) as f:
         config = yaml.safe_load((f))
+    pg_connect = postgres_connect(config)
     a = config['ansible']
-    database_file = config['data']
     c = config['cutoffs']
     ssh_seconds = c['ssh seconds']
     sample_cutoff_hours = c['sample hours']
@@ -102,8 +102,7 @@ def main():
     inv = query_ansible(a['config'], a['inventory'])
     update_tracker_logger.info(f"Found {len(inv.inventory)} hosts")
 
-    # Initialize database
-    conn = init_database(database_file)
+    conn = pg_connect
     sample_time = datetime.datetime.now(datetime.timezone.utc)
 
     # Determine which hosts to sample
@@ -113,7 +112,7 @@ def main():
     elif args.resample:
         # Check each host against its per-host limits to find overdue ones
         cursor = conn.cursor()
-        cursor.execute('SELECT hostname, last_update, uptime_days FROM host_updates')
+        cursor.execute('SELECT hostname, last_update, uptime_days FROM audit.host_updates')
 
         current_date = datetime.date.today()
         overdue_hosts = set()
@@ -124,7 +123,7 @@ def main():
                 overdue_hosts.add(hostname)
             elif last_update is None:
                 overdue_hosts.add(hostname)
-            elif (current_date - datetime.date.fromisoformat(last_update)).days > update_limit:
+            elif (current_date - last_update).days > update_limit:
                 overdue_hosts.add(hostname)
 
         hosts_to_sample = [host for host in inv.inventory if host in overdue_hosts]
@@ -175,4 +174,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

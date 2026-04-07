@@ -7,15 +7,15 @@ import os
 import queue
 import re
 import select
-import sqlite3
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+import psycopg
 import yaml
 
-from update_tracker import init_database, update_tracker_logger, HostLimit, HostSpec
+from update_tracker import postgres_connect, update_tracker_logger, HostLimit, HostSpec
 from update_tracker.query import query_ansible
 
 REBOOT_TIMEOUT = 300      # seconds to wait for host to come back
@@ -76,19 +76,19 @@ def monitor_reboot(hostname: str, account: str, keyfile: Path, results: dict):
     update_tracker_logger.error(f"{hostname}: did not come back within {REBOOT_TIMEOUT}s")
 
 
-def get_kernel_issues(conn: sqlite3.Connection) -> list[tuple[str, bool, bool]]:
+def get_kernel_issues(conn: psycopg.Connection) -> list[tuple[str, bool, bool]]:
     """Return hosts with kernel issues as (hostname, needs_reboot, available)."""
     cursor = conn.cursor()
     cursor.execute('''
         SELECT hostname, kernel_needs_reboot, kernel_available
-        FROM host_updates
-        WHERE kernel_needs_reboot = 1 OR kernel_available = 1
+        FROM audit.host_updates
+        WHERE kernel_needs_reboot = true OR kernel_available = true
         ORDER BY hostname
     ''')
     return [(row[0], bool(row[1]), bool(row[2])) for row in cursor.fetchall()]
 
 
-def do_kernel(conn: sqlite3.Connection, account: str, keyfile: Path, timeout: int):
+def do_kernel(conn: psycopg.Connection, account: str, keyfile: Path, timeout: int):
     hosts = get_kernel_issues(conn)
     if not hosts:
         print("No servers with kernel issues.")
@@ -263,18 +263,21 @@ def find_dpkg_new_files(hostname: str, account: str, keyfile: Path, timeout: int
     return [f.strip() for f in result.stdout.splitlines() if f.strip()]
 
 
-def save_conffile_choice(conn: sqlite3.Connection, hostname: str, conffile: str, choice: str):
+def save_conffile_choice(conn: psycopg.Connection, hostname: str, conffile: str, choice: str):
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT OR REPLACE INTO conffile_choices (hostname, conffile, choice, recorded_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO audit.conffile_choices (hostname, conffile, choice, recorded_at)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (hostname, conffile) DO UPDATE SET
+            choice      = EXCLUDED.choice,
+            recorded_at = EXCLUDED.recorded_at
     ''', (hostname, conffile, choice, datetime.datetime.now(datetime.timezone.utc)))
     conn.commit()
 
 
-def get_conffile_choices(conn: sqlite3.Connection, hostname: str) -> dict[str, str]:
+def get_conffile_choices(conn: psycopg.Connection, hostname: str) -> dict[str, str]:
     cursor = conn.cursor()
-    cursor.execute('SELECT conffile, choice FROM conffile_choices WHERE hostname = ?', (hostname,))
+    cursor.execute('SELECT conffile, choice FROM audit.conffile_choices WHERE hostname = %s', (hostname,))
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
@@ -297,7 +300,7 @@ def apply_conffile_choices_remote(hostname: str, account: str, keyfile: Path,
     return True, "ok"
 
 
-def do_update(conn: sqlite3.Connection, account: str, keyfile: Path, timeout: int,
+def do_update(conn: psycopg.Connection, account: str, keyfile: Path, timeout: int,
               host_spec:HostSpec):
     from update_tracker.database import report as db_report
     issues = db_report(conn, host_spec)
@@ -378,9 +381,9 @@ def do_update(conn: sqlite3.Connection, account: str, keyfile: Path, timeout: in
                     update_tracker_logger.error(f"{hostname}: apt upgrade exception: {e}")
 
 
-def do_apply(conn: sqlite3.Connection, account: str, keyfile: Path, timeout: int):
+def do_apply(conn: psycopg.Connection, account: str, keyfile: Path, timeout: int):
     cursor = conn.cursor()
-    cursor.execute('SELECT DISTINCT hostname FROM conffile_choices ORDER BY hostname')
+    cursor.execute('SELECT DISTINCT hostname FROM audit.conffile_choices ORDER BY hostname')
     hosts = [row[0] for row in cursor.fetchall()]
 
     if not hosts:
@@ -410,7 +413,7 @@ def do_apply(conn: sqlite3.Connection, account: str, keyfile: Path, timeout: int
             print(msg)
             if success:
                 update_tracker_logger.info(f"{hostname}: apply upgrade: {msg}")
-                cursor.execute('DELETE FROM conffile_choices WHERE hostname = ?', (hostname,))
+                cursor.execute('DELETE FROM audit.conffile_choices WHERE hostname = %s', (hostname,))
                 conn.commit()
             else:
                 update_tracker_logger.error(f"{hostname}: apply upgrade failed: {msg}")
@@ -440,12 +443,11 @@ def main():
 
     with open(args.yaml) as f:
         config = yaml.safe_load(f)
-    database_file = config['data']
     a = config['ansible']
     c = config['cutoffs']
     timeout = c['ssh seconds']
 
-    conn = init_database(database_file)
+    conn = postgres_connect(config)
 
     if args.action in ('kernel', 'update', 'apply'):
         inv = query_ansible(a['config'], a['inventory'])

@@ -2,14 +2,14 @@
 import argparse
 import datetime
 import logging
-import sqlite3
 
+import psycopg
 import yaml
 
-from update_tracker import update_tracker_logger, init_database
+from update_tracker import update_tracker_logger, postgres_connect
 from update_tracker.database import report
 
-def delete_host(conn: sqlite3.Connection, hostname: str) -> bool:
+def delete_host(conn: psycopg.Connection, hostname: str) -> bool:
     """Delete a hostname from the database.
 
     Args:
@@ -22,28 +22,28 @@ def delete_host(conn: sqlite3.Connection, hostname: str) -> bool:
     cursor = conn.cursor()
 
     # Check if host exists
-    cursor.execute('SELECT hostname FROM host_updates WHERE hostname = ?', (hostname,))
+    cursor.execute('SELECT hostname FROM audit.host_updates WHERE hostname = %s', (hostname,))
     if not cursor.fetchone():
         return False
 
     # Delete the host
-    cursor.execute('DELETE FROM host_updates WHERE hostname = ?', (hostname,))
+    cursor.execute('DELETE FROM audit.host_updates WHERE hostname = %s', (hostname,))
     conn.commit()
     return True
 
 
-def mark_updated(conn: sqlite3.Connection, hostname: str) -> bool:
+def mark_updated(conn: psycopg.Connection, hostname: str) -> bool:
     """Mark a hostname as updated today."""
     cursor = conn.cursor()
 
-    cursor.execute('SELECT hostname FROM host_updates WHERE hostname = ?', (hostname,))
+    cursor.execute('SELECT hostname FROM audit.host_updates WHERE hostname = %s', (hostname,))
     if not cursor.fetchone():
         return False
 
     today = datetime.date.today()
-    cursor.execute('''UPDATE host_updates
-        SET last_update = ?
-        WHERE hostname = ?''', (today, hostname))
+    cursor.execute('''UPDATE audit.host_updates
+        SET last_update = %s
+        WHERE hostname = %s''', (today, hostname))
     conn.commit()
     return True
 
@@ -73,9 +73,8 @@ def main():
 
     with open(args.yaml) as f:
         config = yaml.safe_load(f)
-    database_file = config['data']
 
-    conn = init_database(database_file)
+    conn = postgres_connect(config)
 
     # Handle delete operation
     if (hostname := args.delete):

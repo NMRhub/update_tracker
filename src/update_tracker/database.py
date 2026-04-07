@@ -29,7 +29,7 @@ def report(conn, host_spec: HostSpec):
     """
     cursor = conn.cursor()
     cursor.execute('''SELECT hostname, last_update, uptime_days, sample_time, kernel_needs_reboot, kernel_available
-        FROM host_updates
+        FROM audit.host_updates
         ORDER BY hostname''')
 
     current_date = datetime.date.today()
@@ -49,10 +49,9 @@ def report(conn, host_spec: HostSpec):
         if last_update is None:
             issues.never_updated.append(hostname)
         else:
-            last_update_date = datetime.date.fromisoformat(last_update)
-            if (current_date - last_update_date).days > update_limit:
-                days_since_update = (current_date - last_update_date).days
-                issues.update_old.append((hostname, last_update_date, days_since_update))
+            if (current_date - last_update).days > update_limit:
+                days_since_update = (current_date - last_update).days
+                issues.update_old.append((hostname, last_update, days_since_update))
 
         if kernel_needs_reboot:
             issues.kernel_needs_reboot.append(hostname)
