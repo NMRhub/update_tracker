@@ -5,7 +5,7 @@ import logging
 
 import yaml
 
-from update_tracker import update_tracker_logger, init_database, query_ansible
+from update_tracker import update_tracker_logger, init_database, query_ansible, HostSpec
 from update_tracker.database import report
 
 def main():
@@ -47,7 +47,9 @@ def main():
     conn = init_database(database_file)
     current_time = datetime.datetime.now(datetime.timezone.utc)
 
-    issues = report(conn, host_limits)
+    hs = HostSpec(host_limits=host_limits)
+
+    issues = report(conn, hs)
     conn.close()
 
     # Display results

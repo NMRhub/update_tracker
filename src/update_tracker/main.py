@@ -62,6 +62,8 @@ def main():
                         help="Only sample overdue servers")
     parser.add_argument('-s', '--server', default=None,
                         help="Only sample this single server")
+    parser.add_argument('-n', '--now', action='store_true',
+                        help="Resample all hosts regardless of last sample time")
 
     args = parser.parse_args()
     log_level = getattr(logging, args.loglevel)
@@ -140,7 +142,7 @@ def main():
         futures: dict[str, Future] = {}
         for host in hosts_to_sample:
             update_tracker_logger.debug(f"host {host}")
-            if not args.resample and not args.server:
+            if not args.resample and not args.server and not args.now:
                 last_sample = get_last_sample_time(conn, host)
                 if last_sample:
                     time_since_sample = sample_time - last_sample
