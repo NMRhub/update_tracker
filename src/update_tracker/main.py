@@ -1,63 +1,57 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
-import logging
 from concurrent.futures import Future
 
-import psycopg
-import yaml
-
-from update_tracker import update_tracker_logger, postgres_connect
+from update_tracker import update_tracker_logger, postgres_connect, add_common_args, setup_logging, load_config, build_host_limits
 from update_tracker.last_update import UpdateChecker
 from update_tracker.query import query_ansible
 
 
-def get_last_sample_time(conn: psycopg.Connection, hostname: str) -> datetime.datetime | None:
+def get_last_sample_time(conn, hostname: str) -> datetime.datetime | None:
     """Get the last sample time for a host."""
     cursor = conn.cursor()
-    cursor.execute('''
-        SELECT sample_time FROM audit.host_updates
-        WHERE hostname = %s
-    ''', (hostname,))
-
+    cursor.execute(
+        'SELECT sample_time FROM audit.host_updates WHERE hostname = %s',
+        (hostname,)
+    )
     row = cursor.fetchone()
-    if row:
-        return row[0]
-    return None
+    return row[0] if row else None
 
 
-def store_update(conn: psycopg.Connection, hostname: str,
+def _is_old_ubuntu(version: str, current: str) -> bool:
+    """Return True if version is older than current (e.g. '22.04' < '24.04')."""
+    def parts(v: str) -> tuple:
+        return tuple(int(x) for x in v.split('.') if x.isdigit())
+    return parts(version) < parts(current)
+
+
+def store_update(conn, hostname: str,
                  last_update_date: datetime.date | None,
-                 uptime: datetime.timedelta,
                  sample_time: datetime.datetime,
                  kernel_needs_reboot: bool | None = None,
-                 kernel_available: bool | None = None):
+                 kernel_available: bool | None = None,
+                 old_version: bool | None = None):
     """Store host update information in the database."""
     cursor = conn.cursor()
-
-    uptime_days = uptime.total_seconds() / 86400.0
-
     cursor.execute('''
         INSERT INTO audit.host_updates
-            (hostname, last_update, uptime_days, sample_time, kernel_needs_reboot, kernel_available)
+            (hostname, last_update, sample_time, kernel_needs_reboot, kernel_available, old_version)
         VALUES (%s, %s, %s, %s, %s, %s)
         ON CONFLICT (hostname) DO UPDATE SET
-            last_update         = EXCLUDED.last_update,
-            uptime_days         = EXCLUDED.uptime_days,
-            sample_time         = EXCLUDED.sample_time,
+            last_update = EXCLUDED.last_update,
+            sample_time = EXCLUDED.sample_time,
             kernel_needs_reboot = EXCLUDED.kernel_needs_reboot,
-            kernel_available    = EXCLUDED.kernel_available
-    ''', (hostname, last_update_date, uptime_days, sample_time,
-          kernel_needs_reboot, kernel_available))
-
+            kernel_available = EXCLUDED.kernel_available,
+            old_version = EXCLUDED.old_version
+    ''', (hostname, last_update_date, sample_time,
+          kernel_needs_reboot, kernel_available, old_version))
     conn.commit()
 
 
 def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('-l', '--loglevel', default='WARN', help="Python logging level")
-    parser.add_argument('--yaml',default="/etc/nmrhub.d/update_tracker.yaml",
-                        help="YAML configuration file")
+    add_common_args(parser)
     parser.add_argument('-r','--resample',action='store_true',
                         help="Only sample overdue servers")
     parser.add_argument('-s', '--server', default=None,
@@ -66,43 +60,22 @@ def main():
                         help="Resample all hosts regardless of last sample time")
 
     args = parser.parse_args()
-    log_level = getattr(logging, args.loglevel)
-
-    # Configure logging with the specified level and force to stderr
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        force=True
-    )
-    with open(args.yaml) as f:
-        config = yaml.safe_load((f))
-    pg_connect = postgres_connect(config)
+    setup_logging(args)
+    config = load_config(args)
+    conn = postgres_connect(config)
     a = config['ansible']
     c = config['cutoffs']
+    current_ubuntu = config.get('current ubuntu')
     ssh_seconds = c['ssh seconds']
     sample_cutoff_hours = c['sample hours']
     sample_cutoff_delta = datetime.timedelta(hours=sample_cutoff_hours)
 
-    # Build per-host limits from each inventory group, using the more permissive
-    # (longer) limits if a host appears in multiple inventories
-    host_limits: dict[str, tuple[int, int]] = {}  # hostname -> (uptime_days, update_days)
-    for inv_name in a['inventory']:
-        inv_limits = c[inv_name]
-        uptime_days = inv_limits['uptime days']
-        update_days = inv_limits['update days']
-        group_inv = query_ansible(a['config'], [inv_name])
-        for host in group_inv.inventory:
-            if host in host_limits:
-                existing_uptime, existing_update = host_limits[host]
-                host_limits[host] = (max(existing_uptime, uptime_days), max(existing_update, update_days))
-            else:
-                host_limits[host] = (uptime_days, update_days)
+    host_limits = build_host_limits(config)
 
     # Get combined inventory (provides SSH credentials)
     inv = query_ansible(a['config'], a['inventory'])
     update_tracker_logger.info(f"Found {len(inv.inventory)} hosts")
 
-    conn = pg_connect
     sample_time = datetime.datetime.now(datetime.timezone.utc)
 
     # Determine which hosts to sample
@@ -112,16 +85,14 @@ def main():
     elif args.resample:
         # Check each host against its per-host limits to find overdue ones
         cursor = conn.cursor()
-        cursor.execute('SELECT hostname, last_update, uptime_days FROM audit.host_updates')
+        cursor.execute('SELECT hostname, last_update FROM audit.host_updates')
 
         current_date = datetime.date.today()
         overdue_hosts = set()
-        for hostname, last_update, uptime_days in cursor.fetchall():
-            uptime_limit, update_limit = host_limits.get(hostname, (0, 0))
+        for hostname, last_update in cursor.fetchall():
+            update_limit = host_limits.get(hostname, 0)
 
-            if uptime_days > uptime_limit:
-                overdue_hosts.add(hostname)
-            elif last_update is None:
+            if last_update is None:
                 overdue_hosts.add(hostname)
             elif (current_date - last_update).days > update_limit:
                 overdue_hosts.add(hostname)
@@ -158,13 +129,19 @@ def main():
             try:
                 r = future.result(timeout=60)
                 update_info = r.update if r.update else "never"
+                old_version = None
+                if r.ubuntu_version and current_ubuntu:
+                    old_version = _is_old_ubuntu(r.ubuntu_version, str(current_ubuntu))
                 update_tracker_logger.info(
-                    f"{host}: update={update_info}, uptime={r.uptime}, "
-                    f"kernel_needs_reboot={r.kernel_needs_reboot}, kernel_available={r.kernel_available}"
+                    f"{host}: update={update_info}, "
+                    f"kernel_needs_reboot={r.kernel_needs_reboot}, kernel_available={r.kernel_available}, "
+                    f"ubuntu={r.ubuntu_version}, old_version={old_version}"
                 )
-                store_update(conn, host, r.update, r.uptime, sample_time,
-                             r.kernel_needs_reboot, r.kernel_available)
+                store_update(conn, host, r.update, sample_time,
+                             r.kernel_needs_reboot, r.kernel_available, old_version)
                 processed += 1
+            except KeyboardInterrupt:
+                update_tracker_logger.warning(f"Interrupted while waiting for {host}, continuing")
             except Exception as e:
                 update_tracker_logger.error(f"Failed to process {host}: {e}")
 

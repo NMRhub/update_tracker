@@ -2,7 +2,6 @@
 import argparse
 import concurrent.futures
 import datetime
-import logging
 import os
 import queue
 import re
@@ -13,9 +12,8 @@ import time
 from pathlib import Path
 
 import psycopg
-import yaml
 
-from update_tracker import postgres_connect, update_tracker_logger, HostLimit, HostSpec
+from update_tracker import postgres_connect, update_tracker_logger, HostLimit, HostSpec, add_common_args, setup_logging, load_config, build_host_limits
 from update_tracker.query import query_ansible
 
 REBOOT_TIMEOUT = 300      # seconds to wait for host to come back
@@ -429,20 +427,12 @@ def main():
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument('action', choices=['reboot', 'update', 'kernel', 'apply'],
                         help="Action to perform")
-    parser.add_argument('-l', '--loglevel', default='WARN', help="Python logging level")
-    parser.add_argument('-s', '--server', action='append',help="limit to just these servers")
-    parser.add_argument('--yaml', default="/etc/nmrhub.d/update_tracker.yaml",
-                        help="YAML configuration file")
+    add_common_args(parser)
+    parser.add_argument('-s', '--server', action='append', help="limit to just these servers")
 
     args = parser.parse_args()
-    logging.basicConfig(
-        level=getattr(logging, args.loglevel),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        force=True
-    )
-
-    with open(args.yaml) as f:
-        config = yaml.safe_load(f)
+    setup_logging(args)
+    config = load_config(args)
     a = config['ansible']
     c = config['cutoffs']
     timeout = c['ssh seconds']
@@ -455,18 +445,7 @@ def main():
     if args.action == 'kernel':
         do_kernel(conn, inv.account, inv.keyfile, timeout)
     elif args.action == 'update':
-        host_spec = HostSpec(args.server)
-        host_limits = host_spec.host_limits
-        for inv_name in a['inventory']:
-            inv_limits = c[inv_name]
-            uptime_days = inv_limits['uptime days']
-            update_days = inv_limits['update days']
-            for host in query_ansible(a['config'], [inv_name]).inventory:
-                if host in host_limits:
-                    eu, uu = host_limits[host]
-                    host_limits[host] = (max(eu, uptime_days), max(uu, update_days))
-                else:
-                    host_limits[host] = (uptime_days, update_days)
+        host_spec = HostSpec(args.server, build_host_limits(config))
         do_update(conn, inv.account, inv.keyfile, timeout, host_spec)
     elif args.action == 'apply':
         do_apply(conn, inv.account, inv.keyfile, timeout)

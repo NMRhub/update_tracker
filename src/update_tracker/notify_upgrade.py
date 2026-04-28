@@ -44,36 +44,33 @@ def main():
 
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT hu.hostname, hu.last_update, hu.uptime_days, hu.kernel_needs_reboot,
-               hu.kernel_available, hu.old_version, us.person_id
+        SELECT hu.hostname, hu.last_update, hu.kernel_needs_reboot,
+               hu.kernel_available, hu.old_version, um.person_id
         FROM audit.host_updates hu
-        JOIN audit.update_schedule us ON hu.hostname = us.hostname
+        LEFT JOIN audit.update_schedule us ON hu.hostname = us.hostname
+        LEFT JOIN audit.user_managed um ON hu.hostname = um.hostname
         WHERE us.update_schedule IS NULL
-          AND us.next_upgrade IS NULL
-          AND us.person_id IS NOT NULL
-          AND NOT us.user_managed
+          AND um.next_upgrade IS NULL
+          AND um.person_id IS NOT NULL
+          AND NOT um.user_managed
         ORDER BY hu.hostname
     ''')
     rows = cursor.fetchall()
 
     processed = 0
-    for hostname, last_update, uptime_days, kernel_needs_reboot, kernel_available, old_version, person_id in rows:
+    for hostname, last_update, kernel_needs_reboot, kernel_available, old_version, person_id in rows:
         if not hs.filter(hostname):
             continue
 
-        uptime_limit, update_limit = host_limits.get(hostname, (0, 0))
+        update_limit = host_limits.get(hostname,0)
 
         actions = []
-        reboot = False
         if last_update is None or (current_date - last_update).days > update_limit:
             actions.append("system updated")
         if kernel_needs_reboot:
             actions.append("rebooted for new kernel")
-            reboot = True
         elif kernel_available:
             actions.append("kernel updated")
-        if not reboot and uptime_days > uptime_limit:
-            actions.append("reboot")
 
         if not old_version and not actions:
             continue

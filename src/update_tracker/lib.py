@@ -25,20 +25,18 @@ def load_config(args: argparse.Namespace) -> dict:
         return yaml.safe_load(f)
 
 
-def build_host_limits(config: dict) -> dict[str, tuple[int, int]]:
+def build_host_limits(config: dict) -> dict[str, int]:
     """Read config for host limits"""
     a = config['ansible']
     c = config['cutoffs']
-    host_limits: dict[str, tuple[int, int]] = {}
+    host_limits: dict[str, int] = {}
     for inv_name in a['inventory']:
         inv_limits = c[inv_name]
-        uptime_days = inv_limits['uptime days']
         update_days = inv_limits['update days']
         group_inv = query_ansible(a['config'], [inv_name])
         for host in group_inv.inventory:
             if host in host_limits:
-                existing_uptime, existing_update = host_limits[host]
-                host_limits[host] = (max(existing_uptime, uptime_days), max(existing_update, update_days))
+                host_limits[host] = max(host_limits[host], update_days)
             else:
-                host_limits[host] = (uptime_days, update_days)
+                host_limits[host] = update_days
     return host_limits

@@ -16,7 +16,7 @@ class SshUser(Protocol):
 
 from update_tracker.query import query_ansible
 
-HostLimit = dict[str, tuple[int, int]]
+HostLimit = dict[str, int]
 
 
 @dataclass
@@ -26,3 +26,5 @@ class HostSpec:
 
     def filter(self,hostname:str)->bool:
         return self.only_these is None or len(self.only_these) == 0 or hostname in self.only_these
+
+from update_tracker.lib import add_common_args, setup_logging, load_config, build_host_limits

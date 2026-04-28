@@ -9,60 +9,20 @@ from pathlib import Path
 from update_tracker import SshUser, update_tracker_logger
 
 
-def to_delta(uptime:str)->datetime.timedelta:
-    """Parse uptime command output to timedelta.
-
-    Args:
-        uptime: Output from 'uptime' command
-        Example: "16:07:47 up 4 days, 22:42,  9 users,  load average: 0.59, 0.84, 0.62"
-
-    Returns:
-        timedelta representing the system uptime
-    """
-    # Extract the uptime portion after "up" and before user count or load average
-    match = re.search(r'up\s+(.+?)(?:,\s+\d+\s+users?|,\s+load)', uptime)
-    if not match:
-        raise ValueError(f"Could not parse uptime from: {uptime}")
-
-    uptime_str = match.group(1).strip()
-
-    days = 0
-    hours = 0
-    minutes = 0
-
-    # Parse days: "4 days" or "1 day"
-    day_match = re.search(r'(\d+)\s+days?', uptime_str)
-    if day_match:
-        days = int(day_match.group(1))
-
-    # Parse hours:minutes: "22:42" or "1:30"
-    time_match = re.search(r'(\d+):(\d+)', uptime_str)
-    if time_match:
-        hours = int(time_match.group(1))
-        minutes = int(time_match.group(2))
-
-    # Parse minutes only: "42 min"
-    min_match = re.search(r'(\d+)\s+min', uptime_str)
-    if min_match and not time_match:
-        minutes = int(min_match.group(1))
-
-    return datetime.timedelta(days=days, hours=hours, minutes=minutes)
-
-
-
 @dataclass
 class KernelStatus:
     needs_reboot: bool | None  # newer kernel installed but not running
     available: bool | None     # newer kernel available in apt
+    ubuntu_version: str | None = None  # e.g. "22.04"; None if not Ubuntu
 
 
 @dataclass
 class LastUpdate:
     update: datetime.date | None
-    uptime: datetime.timedelta
-    # Both are None when the host is not Ubuntu
+    # All None when the host is not Ubuntu
     kernel_needs_reboot: bool | None = field(default=None)  # newer kernel installed but not running
     kernel_available: bool | None = field(default=None)     # newer kernel available in apt
+    ubuntu_version: str | None = field(default=None)        # e.g. "22.04"; None if not Ubuntu
 
 class UpdateChecker:
     _REMOTE_SCRIPT = '/tmp/_check_kernel.py'
@@ -71,9 +31,12 @@ import re, subprocess, sys
 
 try:
     with open('/etc/os-release') as f:
-        if 'ubuntu' not in f.read().lower():
+        content = f.read()
+        if 'ubuntu' not in content.lower():
             print('not-ubuntu')
             sys.exit(0)
+        m = re.search(r'VERSION_ID="?([\\d.]+)"?', content)
+        ubuntu_version = m.group(1) if m else ''
 except FileNotFoundError:
     print('not-ubuntu')
     sys.exit(0)
@@ -94,7 +57,7 @@ subprocess.run(['apt-get', 'update', '-qq'], capture_output=True)
 apt_list = subprocess.run(['apt', 'list', '--upgradable'], capture_output=True, text=True)
 available = sum(1 for line in apt_list.stdout.splitlines() if 'linux-image' in line)
 
-print(f'ubuntu:{needs_reboot}:{available}')
+print(f'ubuntu:{needs_reboot}:{available}:{ubuntu_version}')
 """
 
     def __init__(self, ssh_user: SshUser, timeout: int):
@@ -154,16 +117,12 @@ print(f'ubuntu:{needs_reboot}:{available}')
                         if last_upgrade_date is None or current_date > last_upgrade_date:
                             last_upgrade_date = current_date
 
-        uptime_cmd = ssh_base + ['uptime']
-        uptime_result = subprocess.run(uptime_cmd, capture_output=True, text=True, timeout=self.subprocess_timeout)
-
-        if uptime_result.returncode != 0:
-            raise RuntimeError(f"Failed to get uptime history: {uptime_result.stderr}")
-
         kernel_status = self._check_newer_kernel(ssh_base, remote_user_host)
 
-        return LastUpdate(update=last_upgrade_date, uptime=to_delta(uptime_result.stdout),
-                          kernel_needs_reboot=kernel_status.needs_reboot, kernel_available=kernel_status.available)
+        return LastUpdate(update=last_upgrade_date,
+                          kernel_needs_reboot=kernel_status.needs_reboot,
+                          kernel_available=kernel_status.available,
+                          ubuntu_version=kernel_status.ubuntu_version)
 
     def _check_newer_kernel(self, ssh_base: list, remote_user_host: str) -> KernelStatus:
         scp_cmd = self.scp_base + [str(self._local_script), f'{remote_user_host}:{self._REMOTE_SCRIPT}']
@@ -181,9 +140,14 @@ print(f'ubuntu:{needs_reboot}:{available}')
             return KernelStatus(needs_reboot=None, available=None)
         if output.startswith('ubuntu:'):
             parts = output.split(':')
-            if len(parts) == 3:
+            if len(parts) >= 3:
                 try:
-                    return KernelStatus(needs_reboot=bool(int(parts[1])), available=bool(int(parts[2])))
+                    version = parts[3] if len(parts) >= 4 else None
+                    return KernelStatus(
+                        needs_reboot=bool(int(parts[1])),
+                        available=bool(int(parts[2])),
+                        ubuntu_version=version or None,
+                    )
                 except ValueError:
                     pass
         return KernelStatus(needs_reboot=None, available=None)

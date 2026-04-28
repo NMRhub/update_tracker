@@ -100,7 +100,7 @@ class UpdateTrackerWindow(QMainWindow):
         a = self.config['ansible']
         c = self.config['cutoffs']
         limits_text = ', '.join(
-            f"{inv}: uptime={c[inv]['uptime days']}d, update={c[inv]['update days']}d"
+            f"{inv}: update={c[inv]['update days']}d"
             for inv in a['inventory']
         )
         self.header_label.setText(
@@ -109,15 +109,11 @@ class UpdateTrackerWindow(QMainWindow):
             f"Limits: {limits_text}"
         )
 
-        self._add_tab("Excessive Uptime", [
-            (h, f"{h}: {d:.1f} days (limit: {self.host_limits.get(h, (0, 0))[0]})")
-            for h, d in sorted(issues.uptime, key=lambda x: x[1], reverse=True)
-        ])
         self._add_tab("Never Updated", [
             (h, h) for h in sorted(issues.never_updated)
         ])
         self._add_tab("Outdated Updates", [
-            (h, f"{h}: last updated {date} ({days} days ago, limit: {self.host_limits.get(h, (0, 0))[1]})")
+            (h, f"{h}: last updated {date} ({days} days ago, limit: {self.host_limits.get(h, 0)})")
             for h, date, days in sorted(issues.update_old, key=lambda x: x[2], reverse=True)
         ])
         self._add_tab("Kernel Reboot Needed", [

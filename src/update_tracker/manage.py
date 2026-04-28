@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import datetime
-import logging
 
 import psycopg
-import yaml
 
-from update_tracker import update_tracker_logger, postgres_connect
+from update_tracker import update_tracker_logger, postgres_connect, add_common_args, setup_logging, load_config
 from update_tracker.database import report
 
 def delete_host(conn: psycopg.Connection, hostname: str) -> bool:
@@ -53,27 +51,15 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description='Manage update tracker database'
     )
-    parser.add_argument('-l', '--loglevel', default='WARN', help="Python logging level")
-    parser.add_argument('--yaml', default="/etc/nmrhub.d/update_tracker.yaml",
-                        help="YAML configuration file")
+    add_common_args(parser)
 
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--delete', help="Remove this hostname from database")
     group.add_argument('--mark-updated',help="Manually mark this hostname as updated today")
 
     args = parser.parse_args()
-    log_level = getattr(logging, args.loglevel)
-
-    # Configure logging with the specified level and force to stderr
-    logging.basicConfig(
-        level=log_level,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        force=True
-    )
-
-    with open(args.yaml) as f:
-        config = yaml.safe_load(f)
-
+    setup_logging(args)
+    config = load_config(args)
     conn = postgres_connect(config)
 
     # Handle delete operation
